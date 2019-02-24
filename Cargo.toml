@@ -1,0 +1,22 @@
+[package]
+name = "pytrace_native"
+version = "0.1.0"
+authors = ["Ethan Smith <ethan@ethanhs.me>"]
+edition = "2018"
+build = "build.rs"
+
+[lib]
+name = "pytrace_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+cpp = "0.4"
+serde = { version = "1.0", features = ["derive", "rc"] }
+serde_json = "1.0"
+lazy_static = "^1.2.0"
+[build-dependencies]
+cpp_build = "0.4"
+
+[dependencies.pyo3]
+version = "0.6.0-alpha.4"
+features = ["extension-module", "python3"]
