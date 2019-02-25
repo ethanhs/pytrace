@@ -70,8 +70,9 @@ fn locals_to_args<'a>(
     kwargc: usize,
     coflags: i32,
 ) -> Arc<Vec<Arg>> {
-    let mut args = vec![];
-    let mut items = Vec::with_capacity((argc + kwargc) as usize);
+    // allocate the maximum size possible (args, kwargs, *args + **kwargs)
+    let mut args =  Vec::with_capacity((argc + kwargc + 1) as usize);
+    let mut items = Vec::with_capacity((argc + kwargc + 1) as usize);
     items.extend(locals.iter());
     let positional = &items[..argc];
     let keywordonly = &items[argc..argc + kwargc];
