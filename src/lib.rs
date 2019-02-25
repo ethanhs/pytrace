@@ -6,11 +6,18 @@ use pyo3::ffi::{
     CO_VARKEYWORDS,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyObjectRef, PyString};
+use pyo3::types::{PyDict, PyObjectRef, PyString};
 
 use serde::Serialize;
+use serde_json;
 
 use lazy_static::lazy_static;
+
+use slog::info;
+use slog::Logger;
+use sloggers::Build;
+use sloggers::file::FileLoggerBuilder;
+use sloggers::types::{Severity, OverflowStrategy};
 
 use std::borrow::Cow;
 use std::boxed::Box;
@@ -18,6 +25,8 @@ use std::ffi::CString;
 use std::ops::Deref;
 use std::os::raw::c_int;
 use std::sync::{Arc, Mutex};
+use std::env;
+use std::path::PathBuf;
 
 type _PyFrameEvalFunction = unsafe extern "C" fn(*mut PyFrameObject, c_int) -> *mut PyObject;
 
@@ -27,7 +36,15 @@ cpp! {{
 }}
 
 lazy_static! {
-    static ref PATHS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ref FRAMES: Mutex<Vec<FrameInfo>> = Mutex::new(Vec::with_capacity(10_000));
+    static ref CURRENT_DIR: PathBuf = env::current_dir().unwrap();
+    static ref LOGGER: Logger = {
+        let mut builder = FileLoggerBuilder::new("test.log");
+        builder.level(Severity::Info);
+        builder.overflow_strategy(OverflowStrategy::Block);
+        builder.channel_size(4096);
+        builder.build().unwrap()
+    };
 }
 
 #[derive(Serialize, Debug)]
@@ -107,14 +124,14 @@ fn locals_to_args<'a>(
 }
 
 #[derive(Serialize, Debug)]
-struct FrameInfo<'a> {
-    name: &'a str,
-    filename: &'a str,
+struct FrameInfo {
+    name: String,
+    filename: String,
     args: Arc<Vec<Arg>>,
-    returns: &'a str,
+    returns: String,
 }
 
-impl<'a> FrameInfo<'a> {
+impl<'a> FrameInfo {
     fn new(
         name: &'a str,
         filename: &'a str,
@@ -123,13 +140,13 @@ impl<'a> FrameInfo<'a> {
         argc: i32,
         kwargc: i32,
         coflags: i32,
-    ) -> FrameInfo<'a> {
+    ) -> FrameInfo {
         let args = locals_to_args(locals, argc as usize, kwargc as usize, coflags);
         FrameInfo {
-            name: name,
-            filename: filename,
+            name: String::from(name),
+            filename: String::from(filename),
             args: args,
-            returns: returns,
+            returns: String::from(returns),
         }
     }
 }
@@ -170,7 +187,8 @@ unsafe extern "C" fn frame_printer(frame: *mut PyFrameObject, exc: c_int) -> *mu
     let name = cname.deref();
     let file = cfile.deref();
 
-    if name != "<module>" {
+    let cwd = CURRENT_DIR.to_str().unwrap();
+    if &name[..1usize] != "<" && file.starts_with(cwd) {
         let locals_name = CString::new("f_locals").unwrap();
         let frame_locals = PyObject_GetAttrString(frame as *mut PyObject, locals_name.as_ptr());
         let locals = match py.from_borrowed_ptr_or_opt::<PyObjectRef>(frame_locals) {
@@ -188,7 +206,7 @@ unsafe extern "C" fn frame_printer(frame: *mut PyFrameObject, exc: c_int) -> *mu
             code_obj.co_kwonlyargcount,
             code_obj.co_flags,
         );
-        println!("{:?}", info);
+        info!(LOGGER, "{}", serde_json::to_string(&info).unwrap());
         ret
     } else {
         _PyEval_EvalFrameDefault(frame, exc)
@@ -199,13 +217,7 @@ unsafe extern "C" fn frame_printer(frame: *mut PyFrameObject, exc: c_int) -> *mu
 fn pytrace_native(_py: Python, m: &PyModule) -> PyResult<()> {
     /// Hook into the Python interpreter
     #[pyfn(m, "hook")]
-    fn hook(_py: Python, path_list: &PyList) -> PyResult<()> {
-        let path_strings = path_list.iter().map(|path: &PyObjectRef| {
-            let p = path.to_string();
-            String::from(p.deref())
-        });
-        let mut paths = PATHS.lock().unwrap();
-        paths.extend(path_strings);
+    fn hook(_py: Python) -> PyResult<()> {
         cpp!(unsafe [] {
             PyThreadState *state = PyThreadState_Get();
             _PyFrameEvalFunction func = state->interp->eval_frame;
@@ -224,13 +236,6 @@ fn pytrace_native(_py: Python, m: &PyModule) -> PyResult<()> {
             PyThreadState *state = PyThreadState_Get();
             state->interp->eval_frame = _PyEval_EvalFrameDefault;
         });
-        Ok(())
-    }
-
-    #[pyfn(m, "print_paths")]
-    fn print_paths(_py: Python) -> PyResult<()> {
-        let paths = PATHS.lock().unwrap();
-        println!("{:?}", paths);
         Ok(())
     }
 
