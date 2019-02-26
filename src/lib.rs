@@ -15,18 +15,18 @@ use lazy_static::lazy_static;
 
 use slog::info;
 use slog::Logger;
-use sloggers::Build;
 use sloggers::file::FileLoggerBuilder;
-use sloggers::types::{Severity, OverflowStrategy};
+use sloggers::types::{OverflowStrategy, Severity};
+use sloggers::Build;
 
 use std::borrow::Cow;
 use std::boxed::Box;
+use std::env;
 use std::ffi::CString;
 use std::ops::Deref;
 use std::os::raw::c_int;
-use std::sync::{Arc, Mutex};
-use std::env;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 type _PyFrameEvalFunction = unsafe extern "C" fn(*mut PyFrameObject, c_int) -> *mut PyObject;
 
@@ -71,7 +71,7 @@ fn locals_to_args<'a>(
     coflags: i32,
 ) -> Arc<Vec<Arg>> {
     // allocate the maximum size possible (args, kwargs, *args + **kwargs)
-    let mut args =  Vec::with_capacity((argc + kwargc + 1) as usize);
+    let mut args = Vec::with_capacity((argc + kwargc + 1) as usize);
     let mut items = Vec::with_capacity((argc + kwargc + 1) as usize);
     items.extend(locals.iter());
     let positional = &items[..argc];
