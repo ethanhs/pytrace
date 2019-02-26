@@ -189,7 +189,7 @@ unsafe extern "C" fn frame_printer(frame: *mut PyFrameObject, exc: c_int) -> *mu
     let file = cfile.deref();
 
     let cwd = CURRENT_DIR.to_str().unwrap();
-    if &name[..1usize] != "<" && file.starts_with(cwd) {
+    if &name[..1usize] != "<" && (file.starts_with(cwd) || file == "<stdin>") {
         let locals_name = CString::new("f_locals").unwrap();
         let frame_locals = PyObject_GetAttrString(frame as *mut PyObject, locals_name.as_ptr());
         let locals = match py.from_borrowed_ptr_or_opt::<PyObjectRef>(frame_locals) {
