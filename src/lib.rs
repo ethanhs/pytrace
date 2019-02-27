@@ -14,7 +14,6 @@ use serde_json;
 use lazy_static::lazy_static;
 
 use slog::info;
-use slog::Logger;
 use sloggers::file::FileLoggerBuilder;
 use sloggers::types::{OverflowStrategy, Severity};
 use sloggers::Build;
@@ -35,16 +34,12 @@ cpp! {{
     #include <Python.h>
 }}
 
+// We can safely have a global mutable like this since CPython has a GIL,
+// therefore only one thread can ever be running a frame.
+static mut FRAMES: Option<Mutex<Vec<FrameInfo>>> = None;
+
 lazy_static! {
-    static ref FRAMES: Mutex<Vec<FrameInfo>> = Mutex::new(Vec::with_capacity(10_000));
     static ref CURRENT_DIR: PathBuf = env::current_dir().unwrap();
-    static ref LOGGER: Logger = {
-        let mut builder = FileLoggerBuilder::new("test.log");
-        builder.level(Severity::Info);
-        builder.overflow_strategy(OverflowStrategy::Block);
-        builder.channel_size(4096);
-        builder.build().unwrap()
-    };
 }
 
 #[derive(Serialize, Debug)]
@@ -161,8 +156,8 @@ fn get_type<'a>(py: Python<'a>, obj: *mut PyObject) -> Cow<'a, str> {
 }
 
 /// Hook into the Python interpreter. This will do nothing if
-/// there is an exception, but otherwise will try to print out information on
-/// frames being executed
+/// there is an exception, but otherwise will try to add information on
+/// frames being executed to the global store.
 unsafe extern "C" fn frame_printer(frame: *mut PyFrameObject, exc: c_int) -> *mut PyObject {
     if exc != 0 {
         return _PyEval_EvalFrameDefault(frame, exc);
@@ -207,15 +202,60 @@ unsafe extern "C" fn frame_printer(frame: *mut PyFrameObject, exc: c_int) -> *mu
             code_obj.co_kwonlyargcount,
             code_obj.co_flags,
         );
-        info!(LOGGER, "{}", serde_json::to_string(&info).unwrap());
+        let frames = match FRAMES.as_mut() {
+            Some(frame) => frame.get_mut().unwrap(),
+            None => panic!("Failed to get frames"),
+        };
+        frames.push(info);
+
         ret
     } else {
         _PyEval_EvalFrameDefault(frame, exc)
     }
 }
 
+#[pyclass]
+struct DummyCallback {}
+
+#[pymethods]
+impl DummyCallback {
+    #[call]
+    fn __call__(&self) -> PyResult<()> {
+        let logger = {
+            let mut builder = FileLoggerBuilder::new("test.log");
+            builder.level(Severity::Info);
+            builder.overflow_strategy(OverflowStrategy::Block);
+            builder.channel_size(4096);
+            builder.build().unwrap()
+        };
+        unsafe {
+            let frames = match FRAMES.as_mut() {
+                Some(frame) => frame.get_mut().unwrap(),
+                None => panic!("Failed to get frames"),
+            };
+            info!(logger, "{}", serde_json::to_string(frames).unwrap());
+            info!(logger, "Captured {} frames", frames.len());
+        }
+        Ok(())
+    }
+}
+
 #[pymodule]
-fn pytrace_native(_py: Python, m: &PyModule) -> PyResult<()> {
+fn pytrace_native(py: Python, m: &PyModule) -> PyResult<()> {
+    // We start with creating a vec to store frames. This vec gets dumped at
+    // the end of program execution.
+    // This actually gives a huge performance improvement, as we can turn millions
+    // of small writes into one large one (a > 2.5x speedup!).
+    unsafe {
+        FRAMES = Some(Mutex::new(Vec::new()));
+    }
+    // This code registers the function to dump the frame data at the end.
+    // We need to use a dummy class because we can't pass functions across
+    // the Python <-> Rust boundary.
+    let atexit = py.import("atexit")?;
+    let dummy = DummyCallback {};
+    atexit.call("register", (dummy,), None)?;
+
     /// Hook into the Python interpreter
     #[pyfn(m, "hook")]
     fn hook(_py: Python) -> PyResult<()> {
